@@ -9,3 +9,4 @@ ppss：因为是用chatgpt生成，代码可能会惨不忍睹，如果可以请
 最后输入“./clear-sql”定时清理sql数据库
 然后在解析网站的后台，解析配置里，把代理下载服务器和密码填进去即可。
 ![image](https://github.com/user-attachments/assets/07c600c4-3ebe-4ff1-80ee-f3394891fde5)
+目前仅发布amd64 linux版本（在阿里云官方的服务器系统上编译的）。
