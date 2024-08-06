@@ -1,222 +1,174 @@
 package main
 
 import (
-    "database/sql"
-    "encoding/json"
-    "flag"
-    "io"
-    "log"
-    "net/http"
-    "net/url"
-    "os"
-    "regexp"
-    "sync"
-    "time"
-
-    _ "github.com/mattn/go-sqlite3"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
 )
 
-var bufferPool = sync.Pool{
-    New: func() interface{} {
-        return make([]byte, 32*1024)
-    },
+type Config struct {
+	Port string `json:"port"`
+	Password string `json:"password"`
 }
 
-var (
-    db         *sql.DB
-    httpClient *http.Client
-    xorKey     string
-)
+var config Config
+var mu sync.Mutex
 
-func init() {
-    var err error
-    db, err = sql.Open("sqlite3", "./data.db")
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    createTable := `
-    CREATE TABLE IF NOT EXISTS requests (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        data TEXT NOT NULL,
-        decryptedData TEXT NOT NULL,
-        url TEXT NOT NULL,
-        userAgent TEXT NOT NULL
-    );`
-    _, err = db.Exec(createTable)
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    httpClient = &http.Client{
-        Transport: &http.Transport{
-            MaxIdleConns:       10,
-            IdleConnTimeout:    30 * time.Second,
-            DisableKeepAlives:  false,
-            MaxIdleConnsPerHost: 10,
-        },
-    }
+func loadConfig() {
+	file, err := os.Open("config.json")
+	if err != nil {
+		if os.IsNotExist(err) {
+			config = Config{
+				Port: "8080", // 默认端口
+				Password: "QazXswEdc!56", // 默认密码
+			}
+			saveConfig()
+		} else {
+			log.Fatalf("Error opening config file: %v", err)
+		}
+	} else {
+		defer file.Close()
+		decoder := json.NewDecoder(file)
+		err = decoder.Decode(&config)
+		if err != nil {
+			log.Fatalf("Error decoding config file: %v", err)
+		}
+	}
 }
 
-func handler(w http.ResponseWriter, r *http.Request) {
-    query := r.URL.Query()
-    data := query.Get("data")
-    if data == "" {
-        if !writeHeaderOnce(w, http.StatusForbidden) {
-            return
-        }
-        http.Error(w, "Access denied: didn't provide data", http.StatusForbidden)
-        return
-    }
-
-    decryptedData := xorDecrypt(data, xorKey)
-    var jsonMap map[string]string
-    if err := json.Unmarshal([]byte(decryptedData), &jsonMap); err != nil {
-        if !writeHeaderOnce(w, http.StatusForbidden) {
-            return
-        }
-        http.Error(w, "Access denied", http.StatusForbidden)
-        return
-    }
-
-    actualUrlStr := jsonMap["url"]
-    if actualUrlStr == "" {
-        if !writeHeaderOnce(w, http.StatusForbidden) {
-            return
-        }
-        http.Error(w, "Access denied: didn't provide a link", http.StatusForbidden)
-        return
-    }
-
-    actualUrl, err := url.Parse(actualUrlStr)
-    if err != nil {
-        if !writeHeaderOnce(w, http.StatusForbidden) {
-            return
-        }
-        http.Error(w, "Access denied: invalid link", http.StatusForbidden)
-        return
-    }
-
-    _, err = db.Exec("INSERT INTO requests (data, decryptedData, url, userAgent) VALUES (?, ?, ?, ?)", data, decryptedData, actualUrlStr, jsonMap["ua"])
-    if err != nil {
-        if !writeHeaderOnce(w, http.StatusInternalServerError) {
-            return
-        }
-        http.Error(w, "Server error", http.StatusInternalServerError)
-        return
-    }
-
-    proxyReq, err := http.NewRequest(r.Method, actualUrl.String(), r.Body)
-    if err != nil {
-        if !writeHeaderOnce(w, http.StatusInternalServerError) {
-            return
-        }
-        http.Error(w, "Server error", http.StatusInternalServerError)
-        return
-    }
-    proxyReq.Header = r.Header
-    proxyReq.Header.Set("Host", actualUrl.Host)
-    proxyReq.Header.Set("Referer", actualUrlStr)
-    proxyReq.Header.Set("User-Agent", jsonMap["ua"])
-
-    proxyRes, err := httpClient.Do(proxyReq)
-    if err != nil {
-        if !writeHeaderOnce(w, http.StatusInternalServerError) {
-            return
-        }
-        http.Error(w, "Server error", http.StatusInternalServerError)
-        return
-    }
-    defer proxyRes.Body.Close()
-
-    for key, value := range proxyRes.Header {
-        if key == "Content-Length" || key == "Content-Type" || key == "Content-Range" {
-            w.Header().Set(key, value[0])
-        }
-    }
-
-    contentDisposition := proxyRes.Header.Get("Content-Disposition")
-    filename := "index.html"
-    if contentDisposition != "" {
-        re := regexp.MustCompile(`filename="([^"]+)"`)
-        matches := re.FindStringSubmatch(contentDisposition)
-        if len(matches) == 2 {
-            filename = matches[1]
-        }
-    }
-
-    w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
-
-    if w.Header().Get("Content-Type") == "" {
-        writeHeaderOnce(w, proxyRes.StatusCode)
-    }
-
-    buf := bufferPool.Get().([]byte)
-    defer bufferPool.Put(buf)
-    if _, err := io.CopyBuffer(w, proxyRes.Body, buf); err != nil {
-        if !writeHeaderOnce(w, http.StatusInternalServerError) {
-            return
-        }
-        http.Error(w, "Server error", http.StatusInternalServerError)
-    }
+func saveConfig() {
+	file, err := os.Create("config.json")
+	if err != nil {
+		log.Fatalf("Error creating config file: %v", err)
+	}
+	defer file.Close()
+	encoder := json.NewEncoder(file)
+	err = encoder.Encode(&config)
+	if err != nil {
+		log.Fatalf("Error encoding config file: %v", err)
+	}
 }
 
-func writeHeaderOnce(w http.ResponseWriter, statusCode int) bool {
-    if _, ok := w.(interface{ WriteHeaderOnce(int) }); ok {
-        return false
-    }
-    w.WriteHeader(statusCode)
-    return true
+func hexToBytes(hexStr string) ([]byte, error) {
+	return hex.DecodeString(hexStr)
 }
 
-func xorDecrypt(encrypted, key string) string {
-    encryptedBytes := hex2Bytes(encrypted)
-    keyLength := len(key)
-    output := make([]byte, len(encryptedBytes))
-    for i := range encryptedBytes {
-        output[i] = encryptedBytes[i] ^ key[i%keyLength]
-    }
-    return string(output)
+func xorDecrypt(encrypted string, key string) (string, error) {
+	encryptedBytes, err := hexToBytes(encrypted)
+	if err != nil {
+		return "", err
+	}
+
+	keyBytes := []byte(key)
+	keyLength := len(keyBytes)
+	output := make([]byte, len(encryptedBytes))
+
+	for i := range encryptedBytes {
+		output[i] = encryptedBytes[i] ^ keyBytes[i % keyLength]
+	}
+
+	return string(output), nil
 }
 
-func hex2Bytes(hexStr string) []byte {
-    bytes := make([]byte, len(hexStr)/2)
-    for i := 0; i < len(hexStr); i += 2 {
-        bytes[i/2] = hex2Byte(hexStr[i], hexStr[i+1])
-    }
-    return bytes
-}
+func fetchHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, HEAD, OPTIONS")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 
-func hex2Byte(c1, c2 byte) byte {
-    return (hexChar2Byte(c1) << 4) | hexChar2Byte(c2)
-}
+	data := r.URL.Query().Get("data")
+	if data == "" {
+		http.Error(w, "Access denied: didn't provide data", http.StatusForbidden)
+		return
+	}
 
-func hexChar2Byte(c byte) byte {
-    switch {
-    case '0' <= c && c <= '9':
-        return c - '0'
-    case 'a' <= c && c <= 'f':
-        return c - 'a' + 10
-    case 'A' <= c && c <= 'F':
-        return c - 'A' + 10
-    default:
-        return 0 // 添加默认返回值
-    }
+	var jsonData map[string]string
+	var decryptedData string
+	var err error
+
+	decryptedData, err = xorDecrypt(data, config.Password)
+	if err != nil || json.Unmarshal([]byte(decryptedData), &jsonData) != nil {
+		decryptedData, err = xorDecrypt(data, "download")
+		if err != nil || json.Unmarshal([]byte(decryptedData), &jsonData) != nil {
+			http.Error(w, "Access denied", http.StatusForbidden)
+			return
+		}
+	}
+
+	actualUrlStr, ok := jsonData["url"]
+	if !ok {
+		http.Error(w, "Access denied: didn't provide a link", http.StatusForbidden)
+		return
+	}
+
+	actualUrl := actualUrlStr
+	newRequest, err := http.NewRequest(r.Method, actualUrl, nil)
+	if err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	for key, values := range r.Header {
+		if strings.ToLower(key) != "host" && strings.ToLower(key) != "referer" && !strings.HasPrefix(strings.ToLower(key), "cf-") {
+			for _, value := range values {
+				newRequest.Header.Add(key, value)
+			}
+		}
+	}
+
+	newRequest.Header.Set("User-Agent", jsonData["ua"])
+	client := &http.Client{}
+	response, err := client.Do(newRequest)
+	if err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer response.Body.Close()
+
+	// 处理可能的重定向
+	if response.StatusCode >= 300 && response.StatusCode < 400 {
+		newUrl := response.Header.Get("Location")
+		if newUrl != "" {
+			newRequest, err = http.NewRequest(r.Method, newUrl, nil)
+			if err != nil {
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+				return
+			}
+			response, err = client.Do(newRequest)
+			if err != nil {
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+				return
+			}
+			defer response.Body.Close()
+		}
+	}
+
+	for key, values := range response.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE")
+	w.Header().Set("Access-Control-Allow-Headers", "*")
+	w.WriteHeader(response.StatusCode)
+	io.Copy(w, response.Body)
 }
 
 func main() {
-    port := flag.String("port", "6000", "服务器监听的端口")
-    password := flag.String("password", "QazXswEdc!23", "用于解密的密码")
-    flag.Parse()
-
-    xorKey = *password
-
-    log.Printf("服务器启动中，监听端口: %s，使用的解密密码: %s\n", *port, *password)
-    http.HandleFunc("/", handler)
-    log.Fatal(http.ListenAndServe(":"+*port, nil))
-
-    host, exists := os.LookupEnv("HOST")
-    if exists {
-        log.Printf("环境变量 HOST: %s\n", host)
-    }
+	loadConfig()
+	http.HandleFunc("/", fetchHandler)
+	fmt.Printf("Server starting at port %s...\n", config.Port)
+	if err := http.ListenAndServe(":" + config.Port, nil); err != nil {
+		log.Fatalf("Failed to start server: %v", err)
+	}
 }
