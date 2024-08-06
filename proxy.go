@@ -26,7 +26,7 @@ func loadConfig() {
 		if os.IsNotExist(err) {
 			config = Config{
 				Port: "8080", // 默认端口
-				Password: "QazXswEdc!56", // 默认密码
+				Password: "QazXswEdc!23", // 默认密码
 			}
 			saveConfig()
 		} else {
