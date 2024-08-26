@@ -23,9 +23,6 @@ jobs:
 
     - name: Initialize Go module
       run: go install encoding/hex
-      
-    - name: Initialize Go module 2
-      run: go install encoding/json@latest
 
     - name: Initialize Go module 3
       run: go install io@latest
