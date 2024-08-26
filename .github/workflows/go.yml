@@ -22,7 +22,7 @@ jobs:
         go-version: '1.23.0'
 
     - name: Initialize Go module
-      run: go get -u encoding/hex encoding/json io log net/http os sync
+      run: go install -u encoding/hex encoding/json io log net/http os sync
     
     - name: Build
       run: go build -o ../../proxy.go
