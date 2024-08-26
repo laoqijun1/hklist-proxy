@@ -23,10 +23,7 @@ jobs:
 
     - name: 安装go模块
       run: go install encoding/hex
-
-    - name: 安装go模块 2
-      run: go install github.com/mattn/go-sqlite3@latest
-
+      
     - name: 初始化编译环境
       run: go mod init hklist-proxy
     
