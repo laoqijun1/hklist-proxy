@@ -23,9 +23,6 @@ jobs:
 
     - name: Initialize Go module
       run: go install encoding/hex
-      
-    - name: Initialize Go module 7
-      run: go install sync@latest
     
     - name: Build
       run: go build -o ../../proxy.go
