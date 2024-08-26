@@ -24,9 +24,6 @@ jobs:
     - name: Initialize Go module
       run: go install encoding/hex
       
-    - name: Initialize Go module 6
-      run: go install os@latest
-      
     - name: Initialize Go module 7
       run: go install sync@latest
     
